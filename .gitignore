@@ -27,3 +27,6 @@ node_modules/
 
 # Project-specific: downloaded ISOs used during local testing
 *.iso
+
+# Release notes are generated per-release, not tracked
+release-notes.md

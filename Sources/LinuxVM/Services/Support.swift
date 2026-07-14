@@ -36,7 +36,8 @@ enum DiskImage {
 extension ByteCountFormatter {
     static func human(_ bytes: Int64) -> String {
         let f = ByteCountFormatter()
-        f.countStyle = .file
+        // .binary (1024-base) so a 4 GiB allocation reads "4 GB", not "4.29 GB".
+        f.countStyle = .binary
         return f.string(fromByteCount: bytes)
     }
 }
