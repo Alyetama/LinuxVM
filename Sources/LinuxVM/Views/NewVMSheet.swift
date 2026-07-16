@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct NewVMSheet: View {
     @EnvironmentObject var library: VMLibrary
     @EnvironmentObject var creds: CredentialsStore
+    @EnvironmentObject var hostStore: HostStore
     @Environment(\.dismiss) private var dismiss
 
     @AppStorage(DefaultsKey.cpu) private var defaultCPU = 2
@@ -18,6 +19,7 @@ struct NewVMSheet: View {
     @State private var memoryGB = 4
     @State private var diskGB = 32
     @State private var enhanced = false
+    @State private var targetHostID: String?      // nil = this Mac (local)
     @State private var customLocation: URL?
     @State private var showingFolderPicker = false
     @State private var seeded = false
@@ -39,21 +41,38 @@ struct NewVMSheet: View {
                     field("Name") {
                         TextField("e.g. dev-box", text: $name).textFieldStyle(.roundedBorder)
                     }
+                    if !hostStore.hosts.isEmpty {
+                        field("Create on") {
+                            Picker("", selection: $targetHostID) {
+                                Text("This Mac (local)").tag(String?.none)
+                                ForEach(hostStore.hosts) { h in
+                                    Text(h.label).tag(String?.some(h.id))
+                                }
+                            }.labelsHidden().pickerStyle(.menu)
+                            if targetHostID != nil {
+                                Text("Runs on the remote libvirt host over SSH. Uses an x86_64 image; the host downloads it.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
                     field("Distribution") {
                         Picker("", selection: $distroID) {
                             ForEach(DistroCatalog.all) { Text($0.name).tag($0.id) }
                         }.labelsHidden().pickerStyle(.menu)
                         Text(distro.blurb).font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        if qemuMissing { qemuWarning }
+                        if qemuMissing && targetHostID == nil { qemuWarning }
                     }
                     field("Resources") {
                         Stepper("CPU cores: \(cpu)", value: $cpu, in: VMLimits.minCPU...VMLimits.maxCPU)
                         Stepper("Memory: \(memoryGB) GB", value: $memoryGB, in: 1...VMLimits.maxMemoryGB)
                         Stepper("Disk: \(diskGB) GB", value: $diskGB, in: 8...512, step: 8)
                     }
-                    enhancedSection
-                    storageSection
+                    if targetHostID == nil {
+                        enhancedSection
+                        storageSection
+                    }
                     credInfo
                     if let errorText {
                         Label(errorText, systemImage: "exclamationmark.triangle.fill")
@@ -181,7 +200,7 @@ struct NewVMSheet: View {
             }
             Button("Create & Start") { Task { await create() } }
                 .keyboardShortcut(.defaultAction)
-                .disabled(creating || qemuMissing)
+                .disabled(creating || (targetHostID == nil && qemuMissing))
         }
         .frame(height: 28)
         .padding(20)
@@ -221,11 +240,17 @@ struct NewVMSheet: View {
         creating = true
         let id = UUID()
         let displayName = name.trimmingCharacters(in: .whitespaces).isEmpty ? distro.name : name
+        let hostname = CloudInit.hostname(for: displayName, id: id)
+
+        if let hostID = targetHostID, let host = hostStore.hosts.first(where: { $0.id == hostID }) {
+            await createRemote(id: id, displayName: displayName, hostname: hostname, host: host)
+            return
+        }
+
         var createdDir: URL?
         do {
             let dir = try library.makeDirectory(for: id, in: customLocation)
             createdDir = dir
-            let hostname = CloudInit.hostname(for: displayName, id: id)
 
             try await ImagePreparer.prepare(
                 distro: distro, diskURL: dir.appendingPathComponent("disk.img"),
@@ -263,6 +288,43 @@ struct NewVMSheet: View {
         } catch {
             errorText = error.localizedDescription
             if let d = createdDir { try? FileManager.default.removeItem(at: d) }
+            creating = false; statusText = ""
+        }
+    }
+
+    /// Provisions a VM on a remote libvirt host over SSH (no local disk).
+    private func createRemote(id: UUID, displayName: String, hostname: String, host: RemoteHost) async {
+        let user = creds.username
+        let pass = creds.password
+        let pub = creds.ensureSSHKey()
+        let d = distro
+        let cpuCount = cpu
+        let memBytes = UInt64(memoryGB) * VMLimits.gb
+        let diskBytes = UInt64(diskGB) * VMLimits.gb
+        var createdDir: URL?
+        do {
+            let dir = try library.makeDirectory(for: id)
+            createdDir = dir
+            let record = VMRecord(
+                id: id, name: displayName, distroID: d.id, distroName: d.name,
+                cpuCount: cpuCount, memoryBytes: memBytes, diskSizeBytes: diskBytes,
+                macAddress: VZMACAddress.randomLocallyAdministered().string,
+                hostname: hostname, username: user, enhanced: false, hostID: host.id)
+            record.directoryURL = dir
+
+            statusText = "Provisioning on \(host.name)…"
+            try await Task.detached(priority: .userInitiated) {
+                try RemoteBackend.provision(host: host, record: record, distro: d,
+                                            username: user, password: pass, publicKey: pub)
+            }.value
+
+            try library.register(record)
+            library.instance(for: record).start()
+            creating = false
+            dismiss()
+        } catch {
+            errorText = error.localizedDescription
+            if let dir = createdDir { try? FileManager.default.removeItem(at: dir) }
             creating = false; statusText = ""
         }
     }

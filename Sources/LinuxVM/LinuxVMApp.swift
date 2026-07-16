@@ -20,6 +20,7 @@ struct LinuxVMApp: App {
     @StateObject private var library = VMLibrary()
     @StateObject private var credentials = CredentialsStore()
     @StateObject private var themeManager = ThemeManager()
+    @StateObject private var hostStore = HostStore()
 
     var body: some Scene {
         WindowGroup {
@@ -27,7 +28,9 @@ struct LinuxVMApp: App {
                 .environmentObject(library)
                 .environmentObject(credentials)
                 .environmentObject(themeManager)
+                .environmentObject(hostStore)
                 .frame(minWidth: 900, minHeight: 600)
+                .onAppear { library.hostStore = hostStore }
         }
         .windowToolbarStyle(.unified)
         .commands {
@@ -38,6 +41,7 @@ struct LinuxVMApp: App {
             SettingsView()
                 .environmentObject(credentials)
                 .environmentObject(themeManager)
+                .environmentObject(hostStore)
                 .appTheme(themeManager.current)
         }
     }

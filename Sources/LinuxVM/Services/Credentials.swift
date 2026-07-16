@@ -17,8 +17,9 @@ final class CredentialsStore: ObservableObject {
         return dir
     }()
 
-    /// Deterministic path to the app's SSH private key (used by stats polling).
-    static var sshPrivateKeyPath: String {
+    /// Deterministic path to the app's SSH private key (used by stats polling
+    /// and remote-host SSH from nonisolated/detached contexts).
+    nonisolated static var sshPrivateKeyPath: String {
         appRoot.appendingPathComponent("id_ed25519").path
     }
 

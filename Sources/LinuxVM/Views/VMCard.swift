@@ -68,8 +68,8 @@ struct VMCard: View {
                 VStack(spacing: 5) {
                     BarStat(
                         label: "Disk",
-                        fraction: Double(record.diskAllocatedBytes) / Double(max(record.diskSizeBytes, 1)),
-                        detail: "\(Format.bytes(record.diskAllocatedBytes)) / \(Format.bytes(record.diskSizeBytes))",
+                        fraction: Double(diskUsed(s)) / Double(max(diskTotal(s), 1)),
+                        detail: "\(Format.bytes(diskUsed(s))) / \(Format.bytes(diskTotal(s)))",
                         active: true, tint: accent)
                     ioRow(s)
                 }
@@ -87,6 +87,16 @@ struct VMCard: View {
         .font(.caption2).monospacedDigit()
         .foregroundStyle(running && s != nil ? .secondary : .tertiary)
         .labelStyle(.titleAndIcon)
+    }
+
+    // Remote VMs report disk via virsh; local VMs use the sparse image on disk.
+    private func diskUsed(_ s: GuestSample?) -> UInt64 {
+        if record.isRemote { return s?.diskUsedBytes ?? 0 }
+        return record.diskAllocatedBytes
+    }
+    private func diskTotal(_ s: GuestSample?) -> UInt64 {
+        if record.isRemote, let s, s.diskTotalBytes > 0 { return s.diskTotalBytes }
+        return record.diskSizeBytes
     }
 
     private func memFraction(_ s: GuestSample?) -> Double {
@@ -127,8 +137,10 @@ struct VMCard: View {
                 Button { instance.start() } label: { Label("Start", systemImage: "play.fill") }
                     .buttonStyle(.borderedProminent).controlSize(.small).tint(accent)
             case .running:
-                Button { onOpenConsole() } label: { Label("Console", systemImage: "terminal") }
-                    .controlSize(.small)
+                if !instance.isRemote {
+                    Button { onOpenConsole() } label: { Label("Console", systemImage: "terminal") }
+                        .controlSize(.small)
+                }
                 Button { copySSH() } label: {
                     Label(copied ? "Copied" : "Copy ssh",
                           systemImage: copied ? "checkmark" : "doc.on.doc")

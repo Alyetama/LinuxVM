@@ -1,9 +1,9 @@
 import Foundation
 import Virtualization
 
-/// Wraps one `VZVirtualMachine`: builds its configuration, starts/stops it,
-/// and polls live stats over SSH. Main-actor isolated because
-/// Virtualization.framework requires VM access on the queue it was created on.
+/// Wraps one VM. Local VMs run through Virtualization.framework on this Mac;
+/// remote VMs run on a libvirt host driven over SSH (`vm` stays nil for those).
+/// Main-actor isolated because VZ requires VM access on its creation queue.
 @MainActor
 final class VMInstance: NSObject, ObservableObject, VZVirtualMachineDelegate {
     enum RunState: Equatable {
@@ -25,6 +25,7 @@ final class VMInstance: NSObject, ObservableObject, VZVirtualMachineDelegate {
     }
 
     let record: VMRecord
+    let remoteHost: RemoteHost?
     @Published private(set) var runState: RunState = .stopped
     @Published private(set) var vm: VZVirtualMachine?
     @Published private(set) var stats: GuestSample?
@@ -33,8 +34,11 @@ final class VMInstance: NSObject, ObservableObject, VZVirtualMachineDelegate {
 
     private var statsTask: Task<Void, Never>?
 
-    init(record: VMRecord) {
+    var isRemote: Bool { remoteHost != nil }
+
+    init(record: VMRecord, remoteHost: RemoteHost? = nil) {
         self.record = record
+        self.remoteHost = remoteHost
         super.init()
     }
 
@@ -42,6 +46,7 @@ final class VMInstance: NSObject, ObservableObject, VZVirtualMachineDelegate {
 
     func start() {
         guard !runState.isActive else { return }
+        if let host = remoteHost { startRemote(host); return }
         runState = .starting
         do {
             let config = try buildConfiguration()
@@ -67,14 +72,55 @@ final class VMInstance: NSObject, ObservableObject, VZVirtualMachineDelegate {
         }
     }
 
+    private func startRemote(_ host: RemoteHost) {
+        runState = .starting
+        let name = record.hostname
+        Task {
+            let ok = await Task.detached(priority: .userInitiated) {
+                RemoteBackend.start(host, name)
+            }.value
+            guard self.runState == .starting else { return }
+            if ok {
+                self.runState = .running
+                self.startedAt = Date()
+                self.ipAddress = host.host
+                self.startStatsPolling()
+            } else {
+                self.runState = .error("Could not start on \(host.sshTarget)")
+            }
+        }
+    }
+
     func requestStop() {
-        guard let vm, runState == .running else { return }
+        guard runState == .running else { return }
+        if let host = remoteHost {
+            runState = .stopping
+            let name = record.hostname
+            Task {
+                await Task.detached { RemoteBackend.shutdown(host, name) }.value
+                self.runState = .stopped
+                self.teardown()
+            }
+            return
+        }
+        guard let vm else { return }
         runState = .stopping
         if vm.canRequestStop, (try? vm.requestStop()) != nil { return }
         forceStop()
     }
 
     func forceStop() {
+        if let host = remoteHost {
+            guard runState.isActive else { return }
+            runState = .stopping
+            let name = record.hostname
+            Task {
+                await Task.detached { RemoteBackend.destroy(host, name) }.value
+                self.runState = .stopped
+                self.teardown()
+            }
+            return
+        }
         guard let vm, runState.isActive else { return }
         runState = .stopping
         vm.stop { [weak self] error in
@@ -88,7 +134,7 @@ final class VMInstance: NSObject, ObservableObject, VZVirtualMachineDelegate {
 
     func forceStopForDeletion() {
         statsTask?.cancel()
-        vm?.stop(completionHandler: { _ in })
+        if remoteHost == nil { vm?.stop(completionHandler: { _ in }) }
         vm = nil
         runState = .stopped
     }
@@ -116,6 +162,23 @@ final class VMInstance: NSObject, ObservableObject, VZVirtualMachineDelegate {
 
     private func startStatsPolling() {
         statsTask?.cancel()
+        if let host = remoteHost {
+            let name = record.hostname
+            statsTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    let sample = await Task.detached(priority: .utility) {
+                        RemoteBackend.sample(host: host, name: name)
+                    }.value
+                    if Task.isCancelled { break }
+                    await MainActor.run { [weak self] in
+                        guard let self, self.runState == .running else { return }
+                        if let sample { self.stats = sample }
+                    }
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                }
+            }
+            return
+        }
         let mac = record.macAddress
         let user = record.username
         let key = CredentialsStore.sshPrivateKeyPath
@@ -135,7 +198,7 @@ final class VMInstance: NSObject, ObservableObject, VZVirtualMachineDelegate {
         }
     }
 
-    // MARK: - Configuration
+    // MARK: - Configuration (local only)
 
     private func buildConfiguration() throws -> VZVirtualMachineConfiguration {
         let config = VZVirtualMachineConfiguration()
@@ -150,8 +213,6 @@ final class VMInstance: NSObject, ObservableObject, VZVirtualMachineDelegate {
         config.networkDevices = [makeNetwork()]
         config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         config.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
-        // No serial console: a virtio console makes some installers/gettys grab
-        // it; the graphical display is the only console we want.
         if let fs = try makeSharedFolder() { config.directorySharingDevices = [fs] }
 
         do { try config.validate() }

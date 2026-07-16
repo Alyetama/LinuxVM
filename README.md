@@ -22,6 +22,7 @@ That link always resolves to the newest build, since the DMG filename never chan
 - The dashboard shows real CPU, memory, disk, and disk I/O for each running VM. It reads them over SSH with a key the app sets up on its own.
 - Want a full dev box? Flip one switch and the VM boots with Oh My Zsh (Spaceship prompt, autosuggestions, syntax highlighting), Oh My Tmux, Docker and Compose, Miniforge, plus ripgrep, fd, and bat.
 - Put a VM's disk wherever you like, which is handy for keeping big images off your boot drive.
+- Don't have the local horsepower? Point it at a Linux box running libvirt over SSH and it'll provision the VM there instead, same dashboard either way.
 - Nine color themes if the default isn't your thing: Dracula, Nord, Tokyo Night, Catppuccin, Gruvbox, Solarized, One Dark, and Monokai.
 - It runs on Apple's Virtualization.framework. No Docker, no UTM, and no QEMU at all for Debian.
 

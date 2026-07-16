@@ -1,7 +1,9 @@
 import Foundation
 
 /// One Linux VM. Self-contained in a folder under
-/// ~/Library/Application Support/LinuxVM/VMs/<uuid>/.
+/// ~/Library/Application Support/LinuxVM/VMs/<uuid>/. A local VM boots via
+/// Virtualization.framework on this Mac; a VM with a `hostID` lives on a remote
+/// libvirt host and the folder holds only metadata.
 final class VMRecord: Identifiable, ObservableObject, Codable {
     let id: UUID
     @Published var name: String
@@ -13,20 +15,25 @@ final class VMRecord: Identifiable, ObservableObject, Codable {
     let diskSizeBytes: UInt64
 
     let macAddress: String
-    /// DHCP/cloud-init hostname; also how we find the VM's IP for live stats.
+    /// DHCP/cloud-init hostname; also how we find the VM's IP for local stats
+    /// and the libvirt domain name for remote VMs.
     let hostname: String
     /// The login user provisioned into this VM (used for SSH stats).
     let username: String
     /// Whether the enhanced developer toolchain was provisioned.
     let enhanced: Bool
+    /// nil = local (this Mac); otherwise the id of a remote libvirt host.
+    let hostID: String?
     let createdAt: Date
 
     var directoryURL: URL = URL(fileURLWithPath: "/")   // set on load; not persisted
 
+    var isRemote: Bool { hostID != nil }
+
     init(id: UUID = UUID(), name: String, distroID: String, distroName: String,
          cpuCount: Int, memoryBytes: UInt64, diskSizeBytes: UInt64,
          macAddress: String, hostname: String, username: String,
-         enhanced: Bool = false, createdAt: Date = Date()) {
+         enhanced: Bool = false, hostID: String? = nil, createdAt: Date = Date()) {
         self.id = id
         self.name = name
         self.distroID = distroID
@@ -38,12 +45,13 @@ final class VMRecord: Identifiable, ObservableObject, Codable {
         self.hostname = hostname
         self.username = username
         self.enhanced = enhanced
+        self.hostID = hostID
         self.createdAt = createdAt
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, distroID, distroName, cpuCount, memoryBytes
-        case diskSizeBytes, macAddress, hostname, username, enhanced, createdAt
+        case diskSizeBytes, macAddress, hostname, username, enhanced, hostID, createdAt
     }
 
     convenience init(from decoder: Decoder) throws {
@@ -60,6 +68,7 @@ final class VMRecord: Identifiable, ObservableObject, Codable {
             hostname: try c.decode(String.self, forKey: .hostname),
             username: try c.decode(String.self, forKey: .username),
             enhanced: try c.decodeIfPresent(Bool.self, forKey: .enhanced) ?? false,
+            hostID: try c.decodeIfPresent(String.self, forKey: .hostID),
             createdAt: try c.decode(Date.self, forKey: .createdAt)
         )
     }
@@ -77,6 +86,7 @@ final class VMRecord: Identifiable, ObservableObject, Codable {
         try c.encode(hostname, forKey: .hostname)
         try c.encode(username, forKey: .username)
         try c.encode(enhanced, forKey: .enhanced)
+        try c.encodeIfPresent(hostID, forKey: .hostID)
         try c.encode(createdAt, forKey: .createdAt)
     }
 
@@ -98,7 +108,7 @@ final class VMRecord: Identifiable, ObservableObject, Codable {
     var memoryGB: Double { Double(memoryBytes) / 1_073_741_824.0 }
     var diskGB: Double { Double(diskSizeBytes) / 1_073_741_824.0 }
 
-    /// Actual space the sparse disk image occupies on the Mac right now.
+    /// Actual space the sparse disk image occupies on the Mac right now (local only).
     var diskAllocatedBytes: UInt64 {
         let values = try? diskImageURL.resourceValues(forKeys: [.totalFileAllocatedSizeKey])
         return UInt64(values?.totalFileAllocatedSize ?? 0)

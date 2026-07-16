@@ -2,9 +2,8 @@ import Foundation
 import Combine
 
 /// Owns every VM on disk plus the live `VMInstance` for any that are running.
-/// VMs live either in the default base directory or in custom locations the
-/// user picks; custom locations are tracked in an index so they can be found
-/// again on the next launch.
+/// Local VMs live in the default base directory (or a user-picked location);
+/// remote VMs keep only a metadata folder locally and run on a libvirt host.
 @MainActor
 final class VMLibrary: ObservableObject {
     @Published private(set) var vms: [VMRecord] = []
@@ -15,6 +14,9 @@ final class VMLibrary: ObservableObject {
 
     /// Directories of VMs stored outside the default base.
     private var externalLocations: [URL] = []
+
+    /// Resolves a record's `hostID` to a remote host. Set by the app at launch.
+    weak var hostStore: HostStore?
 
     static let baseDirectory: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -33,19 +35,16 @@ final class VMLibrary: ObservableObject {
 
     func load() {
         var loaded: [VMRecord] = []
-        // Default base directory.
         if let entries = try? FileManager.default.contentsOfDirectory(
             at: Self.baseDirectory, includingPropertiesForKeys: [.isDirectoryKey]) {
             for dir in entries where (try? dir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
                 if let r = loadRecord(at: dir) { loaded.append(r) }
             }
         }
-        // Custom locations (may be on unmounted drives — skip silently if absent).
         externalLocations = readIndex()
         for dir in externalLocations {
             if let r = loadRecord(at: dir) { loaded.append(r) }
         }
-        // De-dupe by id, keep first seen.
         var seen = Set<UUID>()
         vms = loaded.filter { seen.insert($0.id).inserted }.sorted { $0.createdAt < $1.createdAt }
     }
@@ -69,7 +68,9 @@ final class VMLibrary: ObservableObject {
 
     /// Persist a fully-prepared record and add it to the library.
     func register(_ record: VMRecord) throws {
-        try FileManager.default.createDirectory(at: record.sharedFolderURL, withIntermediateDirectories: true)
+        if !record.isRemote {
+            try FileManager.default.createDirectory(at: record.sharedFolderURL, withIntermediateDirectories: true)
+        }
         try record.save()
         if !isUnderDefaultBase(record.directoryURL),
            !externalLocations.contains(where: { $0.standardizedFileURL == record.directoryURL.standardizedFileURL }) {
@@ -82,7 +83,8 @@ final class VMLibrary: ObservableObject {
 
     func instance(for record: VMRecord) -> VMInstance {
         if let existing = instances[record.id] { return existing }
-        let inst = VMInstance(record: record)
+        let host = hostStore?.host(id: record.hostID)
+        let inst = VMInstance(record: record, remoteHost: host)
         instances[record.id] = inst
         return inst
     }
@@ -95,6 +97,11 @@ final class VMLibrary: ObservableObject {
         if let inst = instances[record.id] {
             inst.forceStopForDeletion()
             instances[record.id] = nil
+        }
+        // Remote VM: tear down the domain + disk on the host (best-effort, async).
+        if let host = hostStore?.host(id: record.hostID) {
+            let name = record.hostname
+            Task.detached { RemoteBackend.delete(host, name) }
         }
         try? FileManager.default.removeItem(at: record.directoryURL)
         externalLocations.removeAll { $0.standardizedFileURL == record.directoryURL.standardizedFileURL }

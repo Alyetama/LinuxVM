@@ -20,10 +20,12 @@ struct SettingsView: View {
                 .tabItem { Label("Appearance", systemImage: "paintpalette") }
             CredentialsSettingsTab()
                 .tabItem { Label("Credentials", systemImage: "key.fill") }
+            HostsSettingsTab()
+                .tabItem { Label("Remote Hosts", systemImage: "server.rack") }
             AboutSettingsTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 520, height: 420)
+        .frame(width: 540, height: 460)
     }
 }
 
@@ -217,5 +219,74 @@ private struct AboutSettingsTab: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+}
+
+private struct HostsSettingsTab: View {
+    @EnvironmentObject var hostStore: HostStore
+    @State private var name = ""
+    @State private var user = ""
+    @State private var host = ""
+    @State private var port = "22"
+    @State private var testing = false
+    @State private var testResult: String?
+
+    private var canAdd: Bool {
+        !user.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !host.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    var body: some View {
+        Form {
+            Section("Hosts") {
+                if hostStore.hosts.isEmpty {
+                    Text("No remote hosts yet.").foregroundStyle(.secondary)
+                }
+                ForEach(hostStore.hosts) { h in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(h.name.isEmpty ? h.sshTarget : h.name)
+                            Text("\(h.sshTarget):\(h.port)").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button(role: .destructive) { hostStore.remove(h) } label: {
+                            Image(systemName: "trash")
+                        }.buttonStyle(.borderless)
+                    }
+                }
+            }
+            Section("Add a libvirt host") {
+                TextField("Label (optional)", text: $name)
+                TextField("SSH user", text: $user)
+                TextField("Host / IP", text: $host)
+                TextField("Port", text: $port).frame(width: 90)
+                HStack {
+                    Button("Test") { Task { await test() } }
+                        .disabled(!canAdd || testing)
+                    Button("Add") {
+                        hostStore.add(RemoteHost(name: name, user: user, host: host,
+                                                 port: Int(port) ?? 22))
+                        name = ""; user = ""; host = ""; port = "22"; testResult = nil
+                    }.disabled(!canAdd)
+                    if testing { ProgressView().controlSize(.small) }
+                }
+                if let testResult {
+                    Text(testResult).font(.caption)
+                        .foregroundStyle(testResult.hasPrefix("OK") ? .green : .orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Text("The host needs libvirt, virtinst, qemu-utils, and your SSH public key (Credentials → Copy Public Key) in its authorized_keys.")
+                .font(.caption).foregroundStyle(.tertiary)
+        }
+        .formStyle(.grouped)
+    }
+
+    private func test() async {
+        testing = true; testResult = nil
+        let h = RemoteHost(name: name, user: user, host: host, port: Int(port) ?? 22)
+        let result = await Task.detached { RemoteBackend.test(h) }.value
+        testing = false
+        testResult = (result.ok ? "OK — " : "") + result.message
     }
 }
